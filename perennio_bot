@@ -27,16 +27,50 @@ async def nuova_attivita(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def nome(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['nome'] = update.message.text
+    context.user_data['utente'] = update.message.from_user.username or update.message.from_user.id
     await update.message.reply_text('Inserisci la durata dell\'attività (in ore):')
     return DURATA
 
 async def durata(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['durata'] = update.message.text
-    await update.message.reply_text('Inserisci la data dell\'attività (gg-mm-aaaa):')
+    keyboard = [
+        [InlineKeyboardButton("Oggi", callback_data='oggi'), InlineKeyboardButton("Altra Data", callback_data='altra_data')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text('Seleziona la data dell\'attività:', reply_markup=reply_markup)
     return DATA
 
-async def data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['data'] = update.message.text
+async def data_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    choice = query.data
+
+    if choice == 'oggi':
+        today = dt.date.today()
+        context.user_data['data'] = today.strftime('%d-%m-%Y')
+        await query.answer()
+        await query.edit_message_text(text=f"Hai selezionato oggi ({context.user_data['data']}).")
+        return await poll(update, context)
+
+    elif choice == 'altra_data':
+        await query.answer()
+        await query.edit_message_text(text="Inserisci la data dell'attività (gg-mm-aaaa):")
+        return DATA
+
+async def validate_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    date_text = update.message.text
+    try:
+        valid_date = dt.datetime.strptime(date_text, '%d-%m-%Y').date()
+        context.user_data['data'] = valid_date.strftime('%d-%m-%Y')
+        await poll(update, context)
+        return PARTECIPANTI
+    except ValueError:
+        await update.message.reply_text("Formato data non valido. Inserisci la data nel formato gg-mm-aaaa:")
+        return DATA
+
+async def poll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if 'data' not in context.user_data:
+        context.user_data['data'] = update.message.text  # Save the date if it's inputted by the user
+
     options = ["Marco", "Juri", "Altro"]
     poll = await context.bot.send_poll(
         chat_id=update.effective_chat.id,
@@ -46,8 +80,8 @@ async def data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         allows_multiple_answers=True
     )
     context.user_data['poll_id'] = poll.poll.id
-    context.user_data['chat_id'] = update.effective_chat.id  # Store the chat ID
-    context.bot_data['poll_options'] = options  # Store poll options for reference
+    context.user_data['chat_id'] = update.effective_chat.id
+    context.bot_data['poll_options'] = options
     return PARTECIPANTI
 
 async def poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -58,8 +92,8 @@ async def poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return
 
     selected_options = [context.bot_data['poll_options'][i] for i in poll_answer.option_ids]
-    context.user_data['partecipanti'] = selected_options
-    chat_id = context.user_data.get('chat_id')  # Retrieve the stored chat ID
+    context.user_data['partecipanti'] = [option for option in selected_options if option != "Altro"]
+    chat_id = context.user_data.get('chat_id')
 
     if "Altro" in selected_options:
         await context.bot.send_message(
@@ -78,7 +112,7 @@ async def altro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         partecipanti_in_piu = update.message.text.split()
         context.user_data['partecipanti'].extend(partecipanti_in_piu)
         context.user_data['awaiting_altro'] = False
-        chat_id = context.user_data.get('chat_id')  # Retrieve the stored chat ID
+        chat_id = context.user_data.get('chat_id')
         await dati(update, context, chat_id)
         return ConversationHandler.END
     return ConversationHandler.END
@@ -88,7 +122,8 @@ async def dati(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int)
         'Nome': context.user_data['nome'],
         'Durata': context.user_data['durata'],
         'Data': context.user_data['data'],
-        'Partecipanti': ", ".join(context.user_data['partecipanti'])
+        'Partecipanti': ", ".join(context.user_data['partecipanti']),
+        'Utente': context.user_data['utente']
     }
 
     new_df = pd.DataFrame([attivita])
@@ -107,7 +142,8 @@ async def dati(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int)
         text=(
             f"Attività creata:\nNome: {context.user_data['nome']}\n"
             f"Durata: {context.user_data['durata']} ore\nData: {context.user_data['data']}\n"
-            f"Partecipanti: {', '.join(context.user_data['partecipanti'])}\nConfermi?"
+            f"Partecipanti: {', '.join(context.user_data['partecipanti'])}\n"
+            f"Utente: {context.user_data['utente']}\nConfermi?"
         ),
         reply_markup=reply_markup
     )
@@ -139,7 +175,10 @@ def main() -> None:
         states={
             NOME: [MessageHandler(filters.TEXT & ~filters.COMMAND, nome)],
             DURATA: [MessageHandler(filters.TEXT & ~filters.COMMAND, durata)],
-            DATA: [MessageHandler(filters.TEXT & ~filters.COMMAND, data)],
+            DATA: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, validate_date),
+                CallbackQueryHandler(data_choice, pattern='^(oggi|altra_data)$')
+            ],
             PARTECIPANTI: [PollAnswerHandler(poll_answer)],
             ALTRO: [MessageHandler(filters.TEXT & ~filters.COMMAND, altro)],
         },
@@ -152,7 +191,7 @@ def main() -> None:
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(conferma_attivita, pattern='^conferma_attivita$'))
     application.add_handler(CallbackQueryHandler(annulla_attivita, pattern='^annulla_attivita$'))
-
+    application.add_handler(CallbackQueryHandler(data_choice, pattern='^(oggi|altra_data)$'))
     application.run_polling()
 
 if __name__ == '__main__':
